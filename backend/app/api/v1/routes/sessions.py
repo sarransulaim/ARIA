@@ -65,10 +65,29 @@ async def get_session_messages(
     return await svc.get_messages(session_id, limit=limit, offset=offset)
 
 
-@router.delete("/{session_id}", status_code=204)
+@router.put("/{session_id}", response_model=SessionResponse)
+async def update_session(
+    session_id: uuid.UUID,
+    payload: SessionUpdate,
+    db: AsyncSession = Depends(get_db),
+) -> SessionResponse:
+    svc = SessionService(db)
+    session = await svc.get_by_id(session_id)
+    if not session:
+        raise SessionNotFoundError(str(session_id))
+    session = await svc.update(session_id, payload)
+    return await svc.to_response(session)
+
+
+@router.put("/{session_id}/archive", response_model=SessionResponse)
 async def archive_session(
     session_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
-) -> None:
+) -> SessionResponse:
     svc = SessionService(db)
+    session = await svc.get_by_id(session_id)
+    if not session:
+        raise SessionNotFoundError(str(session_id))
     await svc.archive(session_id)
+    session = await svc.get_by_id(session_id)
+    return await svc.to_response(session)

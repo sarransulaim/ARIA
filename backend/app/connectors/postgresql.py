@@ -1,3 +1,4 @@
+import re
 import time
 from typing import Any, Dict, List, Optional
 
@@ -6,10 +7,18 @@ import asyncpg
 from app.connectors.base import BaseConnector
 from app.core.exceptions import QueryExecutionError
 
+_DSN_RE = re.compile(r"postgresql://[^:]+:[^@]+@")
+
 
 class PostgreSQLConnector(BaseConnector):
     def get_dialect(self) -> str:
         return "postgres"
+
+    @staticmethod
+    def _sanitize_error(exc: Exception) -> str:
+        """Strip DSN credentials from asyncpg error messages."""
+        msg = str(exc)
+        return _DSN_RE.sub("postgresql://***:***@", msg)
 
     def _dsn(self) -> str:
         host = self.config.get("host", "localhost")
@@ -36,7 +45,7 @@ class PostgreSQLConnector(BaseConnector):
             return {"success": True, "latency_ms": latency_ms, "error": None}
         except Exception as exc:
             latency_ms = int((time.monotonic() - start) * 1000)
-            return {"success": False, "latency_ms": latency_ms, "error": str(exc)}
+            return {"success": False, "latency_ms": latency_ms, "error": self._sanitize_error(exc)}
         finally:
             if conn and not conn.is_closed():
                 await conn.close()
@@ -63,7 +72,7 @@ class PostgreSQLConnector(BaseConnector):
                 "execution_time_ms": execution_time_ms,
             }
         except Exception as exc:
-            raise QueryExecutionError(str(exc))
+            raise QueryExecutionError(self._sanitize_error(exc))
         finally:
             if conn and not conn.is_closed():
                 await conn.close()
