@@ -36,13 +36,23 @@ class SchemaBrain:
 
     # ── Private helpers ────────────────────────────────────────────────────────
 
-    async def _embed(self, text_to_embed: str) -> List[float]:
-        response = await self._openai.embeddings.create(
-            model="text-embedding-3-small",
-            input=text_to_embed,
-            dimensions=1536,
-        )
-        return response.data[0].embedding
+    def _embeddings_enabled(self) -> bool:
+        key = settings.openai_api_key or ""
+        return bool(key) and not key.startswith("sk-placeholder")
+
+    async def _embed(self, text_to_embed: str) -> Optional[List[float]]:
+        """Return embedding vector, or None if OpenAI key is not configured."""
+        if not self._embeddings_enabled():
+            return None
+        try:
+            response = await self._openai.embeddings.create(
+                model="text-embedding-3-small",
+                input=text_to_embed,
+                dimensions=1536,
+            )
+            return response.data[0].embedding
+        except Exception:
+            return None
 
     async def _log_llm(
         self,
@@ -178,7 +188,7 @@ class SchemaBrain:
             # ── Table-level description + embedding ───────────────────────────
             description = await self._describe_table(table_key, table_info)
             embed_text = f"Table {tbl_schema}.{tbl_name}: {description}"
-            embedding = await self._embed(embed_text)
+            embedding: Optional[List[float]] = await self._embed(embed_text)
 
             # Upsert schema_tables row
             result = await self.db.execute(
@@ -216,7 +226,7 @@ class SchemaBrain:
                 col_embed_text = (
                     f"Column {col_name} in {tbl_schema}.{tbl_name}: {col_description}"
                 )
-                col_embedding = await self._embed(col_embed_text)
+                col_embedding: Optional[List[float]] = await self._embed(col_embed_text)
 
                 result = await self.db.execute(
                     select(SchemaColumn).where(
@@ -257,48 +267,73 @@ class SchemaBrain:
             data_conn.schema_last_indexed_at = datetime.now(timezone.utc)
             await self.db.flush()
 
-        # Bust the Redis schema cache so next read hits the DB
+        # Bust the Redis schema cache so next read hits the DB (best-effort).
         if self.cache:
-            await self.cache.delete(RedisKeys.schema_cache(str(self.connection_id)))
+            try:
+                await self.cache.delete(RedisKeys.schema_cache(str(self.connection_id)))
+            except Exception:
+                pass
 
     async def find_relevant_tables(
         self, question: str, top_k: int = 5
     ) -> List[Dict[str, Any]]:
         """
         Embed the question and run a pgvector cosine similarity search against
-        schema_tables.embedding. Returns the top_k tables enriched with their columns.
+        schema_tables.embedding. Falls back to listing all tables for the connection
+        when embeddings are unavailable (no OpenAI key or pgvector not installed).
         """
         question_embedding = await self._embed(question)
-        embedding_literal = self._format_embedding(question_embedding)
 
-        rows = (
-            await self.db.execute(
-                text(
-                    """
-                    SELECT
-                        id,
-                        connection_id,
-                        table_schema,
-                        table_name,
-                        description,
-                        tags,
-                        created_at,
-                        updated_at,
-                        1 - (embedding <=> :emb::vector) AS similarity
-                    FROM schema_tables
-                    WHERE connection_id = :cid
-                      AND embedding IS NOT NULL
-                    ORDER BY embedding <=> :emb::vector
-                    LIMIT :top_k
-                    """
-                ),
-                {
-                    "emb": embedding_literal,
-                    "cid": str(self.connection_id),
-                    "top_k": top_k,
-                },
+        if question_embedding is not None:
+            embedding_literal = self._format_embedding(question_embedding)
+            rows = (
+                await self.db.execute(
+                    text(
+                        """
+                        SELECT
+                            id,
+                            connection_id,
+                            table_schema,
+                            table_name,
+                            description,
+                            tags,
+                            created_at,
+                            updated_at,
+                            1 - (embedding <=> :emb::vector) AS similarity
+                        FROM schema_tables
+                        WHERE connection_id = :cid
+                          AND embedding IS NOT NULL
+                        ORDER BY embedding <=> :emb::vector
+                        LIMIT :top_k
+                        """
+                    ),
+                    {
+                        "emb": embedding_literal,
+                        "cid": str(self.connection_id),
+                        "top_k": top_k,
+                    },
+                )
+            ).fetchall()
+        else:
+            # No embeddings available — return all indexed tables (no similarity score).
+            result = await self.db.execute(
+                select(SchemaTable)
+                .where(SchemaTable.connection_id == self.connection_id)
+                .limit(top_k)
             )
-        ).fetchall()
+            raw_rows = result.scalars().all()
+            rows = [
+                type("Row", (), {
+                    "id": r.id,
+                    "connection_id": r.connection_id,
+                    "table_schema": r.table_schema,
+                    "table_name": r.table_name,
+                    "description": r.description,
+                    "tags": r.tags,
+                    "similarity": 0.0,
+                })()
+                for r in raw_rows
+            ]
 
         tables: List[Dict[str, Any]] = []
         for row in rows:

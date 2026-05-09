@@ -2,13 +2,22 @@
 Seed a DataConnection pointing at ARIA's own PostgreSQL instance, then
 immediately trigger schema indexing so the Schema Brain knows all ARIA tables.
 
-Usage (from repo root):
+Usage:
+    # In Docker:
     docker-compose exec backend python scripts/seed_test_connection.py
+
+    # Locally (from backend/):
+    python scripts/seed_test_connection.py
+
+The script derives the DB host, user, and password from DATABASE_URL in the
+environment so it works identically inside Docker or a local venv.
 """
 import asyncio
 import json
+import re
 import sys
 import os
+import uuid
 
 # Ensure the backend package root is on the path when run directly.
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
@@ -16,24 +25,60 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from sqlalchemy import select
 
 from app.core.database import AsyncSessionLocal
-from app.models.db.models import DataConnection
+from app.core.config import settings
+from app.models.db.models import DataConnection, User
 from app.utils.encryption import encrypt
+
+# Matches _SENTINEL_USER_ID in session_service.py
+_SENTINEL_USER_ID = uuid.UUID("00000000-0000-0000-0000-000000000001")
 
 
 _CONNECTION_NAME = "ARIA Internal DB"
-_CONFIG = {
-    "host": "postgres",
-    "port": 5432,
-    "database": "aria_db",
-}
-_CREDENTIALS = {
-    "username": "aria",
-    "password": "aria_secret",
-}
+
+
+def _parse_db_url(url: str) -> tuple[str, int, str, str, str]:
+    """Return (host, port, database, user, password) from a SQLAlchemy DSN."""
+    # Strip driver prefix: postgresql+asyncpg:// → postgresql://
+    url = re.sub(r"^[^:]+\+[^:]+://", "postgresql://", url)
+    m = re.match(
+        r"postgresql://(?P<user>[^:]+):(?P<password>[^@]+)@(?P<host>[^:/]+)(?::(?P<port>\d+))?/(?P<db>[^?]+)",
+        url,
+    )
+    if not m:
+        raise ValueError(f"Cannot parse DATABASE_URL: {url!r}")
+    return (
+        m.group("host"),
+        int(m.group("port") or 5432),
+        m.group("db"),
+        m.group("user"),
+        m.group("password"),
+    )
+
+
+_HOST, _PORT, _DATABASE, _USER, _PASSWORD = _parse_db_url(settings.database_url)
+
+_CONFIG = {"host": _HOST, "port": _PORT, "database": _DATABASE}
+_CREDENTIALS = {"username": _USER, "password": _PASSWORD}
 
 
 async def main() -> None:
     async with AsyncSessionLocal() as db:
+        # Ensure sentinel user exists (required by sessions FK).
+        sentinel = await db.execute(
+            select(User).where(User.id == _SENTINEL_USER_ID)
+        )
+        if not sentinel.scalar_one_or_none():
+            db.add(User(
+                id=_SENTINEL_USER_ID,
+                clerk_id="seed-script",
+                email="seed@aria.internal",
+                name="Seed User",
+                is_active=True,
+            ))
+            await db.flush()
+            await db.commit()
+            print("Created sentinel user for FK constraint.")
+
         # Upsert: if a connection with this name already exists, reuse it.
         existing = await db.execute(
             select(DataConnection).where(DataConnection.name == _CONNECTION_NAME)
@@ -74,7 +119,7 @@ async def main() -> None:
 
     print(f"\nconnection_id={connection_id}")
     print("\nNext step:")
-    print(f"  docker-compose exec backend python scripts/test_analysis.py {connection_id}")
+    print(f"  python scripts/test_analysis.py {connection_id}")
 
 
 if __name__ == "__main__":
