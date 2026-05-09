@@ -60,6 +60,10 @@ class Settings(BaseSettings):
     # Schema Brain
     schema_cache_ttl: int = Field(3600, alias="SCHEMA_CACHE_TTL")
 
+    # Agent system
+    sql_agent_max_retries: int = Field(3, alias="SQL_AGENT_MAX_RETRIES")
+    redis_cache_ttl: int = Field(3600, alias="REDIS_CACHE_TTL")
+
     # Feature flags
     feature_proactive_agent: bool = Field(False, alias="FEATURE_PROACTIVE_AGENT")
     feature_google_slides: bool = Field(False, alias="FEATURE_GOOGLE_SLIDES")

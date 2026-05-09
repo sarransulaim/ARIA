@@ -12,7 +12,6 @@ from app.api.v1.routes import (
     connections,
     sessions,
     queries,
-    analysis,
     schema,
     outputs,
 )
@@ -66,7 +65,6 @@ async def health_check() -> dict:
 app.include_router(auth.router, prefix="/api/v1/auth", tags=["auth"])
 app.include_router(connections.router, prefix="/api/v1/connections", tags=["connections"])
 app.include_router(sessions.router, prefix="/api/v1/sessions", tags=["sessions"])
-app.include_router(queries.router, prefix="/api/v1/queries", tags=["queries"])
-app.include_router(analysis.router, prefix="/api/v1/analysis", tags=["analysis"])
+app.include_router(queries.router, prefix="/api/v1/analysis", tags=["analysis"])
 app.include_router(schema.router, prefix="/api/v1/schema", tags=["schema"])
 app.include_router(outputs.router, prefix="/api/v1/outputs", tags=["outputs"])
