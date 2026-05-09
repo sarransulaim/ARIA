@@ -6,6 +6,7 @@ from fastapi.responses import Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
+from fastapi import HTTPException
 from app.core.exceptions import SessionNotFoundError, StorageError
 from app.models.db.models import Presentation, Report
 from app.models.schemas.output import (
@@ -84,7 +85,7 @@ async def get_report(
     svc = OutputService(db)
     report = await svc.get_report(report_id)
     if not report:
-        raise StorageError(f"Report {report_id} not found")
+        raise HTTPException(status_code=404, detail=f"Report {report_id} not found")
     return ReportResponse.model_validate(report)
 
 
@@ -100,7 +101,7 @@ async def download_report(
     svc = OutputService(db)
     report = await svc.get_report(report_id)
     if not report:
-        raise StorageError(f"Report {report_id} not found")
+        raise HTTPException(status_code=404, detail=f"Report {report_id} not found")
     if report.status != "ready":
         return Response(
             content=f'{{"detail":"Report is not ready yet. Current status: {report.status}"}}',
@@ -168,7 +169,7 @@ async def get_presentation(
     svc = OutputService(db)
     pres = await svc.get_presentation(presentation_id)
     if not pres:
-        raise StorageError(f"Presentation {presentation_id} not found")
+        raise HTTPException(status_code=404, detail=f"Presentation {presentation_id} not found")
     return PresentationResponse.model_validate(pres)
 
 
@@ -184,7 +185,7 @@ async def download_presentation(
     svc = OutputService(db)
     pres = await svc.get_presentation(presentation_id)
     if not pres:
-        raise StorageError(f"Presentation {presentation_id} not found")
+        raise HTTPException(status_code=404, detail=f"Presentation {presentation_id} not found")
     if pres.status != "ready":
         return Response(
             content=f'{{"detail":"Presentation is not ready yet. Current status: {pres.status}"}}',
