@@ -160,7 +160,7 @@ class Message(ARIABase):
     role: Mapped[str] = mapped_column(String(50), nullable=False)
     message_type: Mapped[str] = mapped_column(String(100), default="text", nullable=False)
     content: Mapped[str] = mapped_column(Text, nullable=False)
-    metadata: Mapped[dict] = mapped_column(JSONB, default=dict, nullable=False)
+    msg_metadata: Mapped[dict] = mapped_column("metadata", JSONB, default=dict, nullable=False)
     parent_message_id: Mapped[Optional[uuid.UUID]] = mapped_column(
         UUID(as_uuid=True), ForeignKey("messages.id", ondelete="SET NULL"), nullable=True, index=True
     )
