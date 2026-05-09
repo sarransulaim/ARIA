@@ -98,5 +98,8 @@ class ConnectionService:
         if result.get("success"):
             conn.last_tested_at = datetime.now(timezone.utc)
             await self.db.flush()
+            # Auto-trigger schema indexing after a successful connection test
+            from app.tasks.schema_tasks import index_connection_schema  # late import avoids cycle
+            index_connection_schema.delay(str(conn.id))
 
         return ConnectionTestResponse(**result)

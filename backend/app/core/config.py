@@ -57,6 +57,9 @@ class Settings(BaseSettings):
     def cors_origins(self) -> List[str]:
         return [o.strip() for o in self.allowed_origins.split(",") if o.strip()]
 
+    # Schema Brain
+    schema_cache_ttl: int = Field(3600, alias="SCHEMA_CACHE_TTL")
+
     # Feature flags
     feature_proactive_agent: bool = Field(False, alias="FEATURE_PROACTIVE_AGENT")
     feature_google_slides: bool = Field(False, alias="FEATURE_GOOGLE_SLIDES")

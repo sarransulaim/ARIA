@@ -76,6 +76,10 @@ class RedisKeys:
         return f"aria:conn:{connection_id}:test"
 
     @staticmethod
+    def schema_task(connection_id: str) -> str:
+        return f"aria:schema:{connection_id}:task"
+
+    @staticmethod
     def user_rate_limit(user_id: str) -> str:
         return f"aria:ratelimit:{user_id}"
 
