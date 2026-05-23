@@ -9,7 +9,23 @@ class AnalysisRequest(BaseModel):
     session_id: uuid.UUID
     question: str = Field(..., min_length=1, max_length=5000)
     connection_id: uuid.UUID
-    user_id: Optional[uuid.UUID] = None  # populated from auth header in Phase 7
+    user_id: Optional[uuid.UUID] = None
+
+
+class AnalysisArtifact(BaseModel):
+    artifact_type: str  # sql | table | chart | statistics | insights | query_plan | stat_card
+    title: str
+    data: Dict[str, Any]
+
+
+class StepResult(BaseModel):
+    step: int
+    sql: str
+    explanation: str
+    columns: List[str]
+    rows: List[List[Any]]
+    row_count: int
+    execution_time_ms: int
 
 
 class AnalysisResponse(BaseModel):
@@ -22,6 +38,16 @@ class AnalysisResponse(BaseModel):
     suggested_followups: List[str] = []
     visualization_config: Optional[Dict[str, Any]] = None
     error: bool = False
+    # Rich fields added by the senior analyst upgrade
+    analysis_type: Optional[str] = None
+    analysis_title: Optional[str] = None
+    artifacts: List[AnalysisArtifact] = []
+    key_insights: List[str] = []
+    statistical_summary: Optional[Dict[str, Any]] = None
+    data_quality_warnings: List[str] = []
+    query_plan: List[str] = []
+    all_charts: List[Dict[str, Any]] = []
+    all_step_results: List[StepResult] = []
 
 
 class QueryExecutionResponse(BaseModel):

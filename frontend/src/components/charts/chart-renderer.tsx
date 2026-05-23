@@ -1,5 +1,7 @@
 "use client";
 import {
+  Area,
+  AreaChart,
   Bar,
   BarChart,
   CartesianGrid,
@@ -7,8 +9,6 @@ import {
   Legend,
   Line,
   LineChart,
-  Pie,
-  PieChart,
   ResponsiveContainer,
   Scatter,
   ScatterChart,
@@ -25,20 +25,51 @@ interface ChartRendererProps {
 
 const COLORS = ["#6366f1", "#22d3ee", "#f59e0b", "#10b981", "#f43f5e", "#8b5cf6"];
 
-function buildData(results: ResultsPreview): Record<string, unknown>[] {
+function buildDataFromResults(results: ResultsPreview): Record<string, unknown>[] {
   const { columns, rows } = results;
   return rows.map((row) => {
     const obj: Record<string, unknown> = {};
-    columns.forEach((col, i) => { obj[col] = row[i]; });
+    columns.forEach((col, i) => {
+      obj[col] = row[i];
+    });
     return obj;
   });
 }
 
-export function ChartRenderer({ config, results }: ChartRendererProps) {
-  const data = buildData(results);
-  const { chart_type, x_axis = "", y_axis = "", title } = config;
+function normalize(config: VisualizationConfig): {
+  chartType: string;
+  xKey: string;
+  yKeys: string[];
+  title: string | undefined;
+} {
+  // New format: type, x_key, y_keys
+  if (config.type && config.x_key) {
+    return {
+      chartType: config.type,
+      xKey: config.x_key,
+      yKeys: config.y_keys ?? [],
+      title: config.title,
+    };
+  }
+  // Legacy format: chart_type, x_axis, y_axis
+  return {
+    chartType: config.chart_type ?? "bar",
+    xKey: config.x_axis ?? "",
+    yKeys: config.y_axis ? [config.y_axis] : [],
+    title: config.title,
+  };
+}
 
-  if (!data.length || !x_axis || !y_axis) {
+export function ChartRenderer({ config, results }: ChartRendererProps) {
+  const { chartType, xKey, yKeys, title } = normalize(config);
+
+  // Prefer data embedded in config (new format) over building from results
+  const rawData =
+    Array.isArray(config.data) && config.data.length
+      ? (config.data as Record<string, unknown>[])
+      : buildDataFromResults(results);
+
+  if (!rawData.length || !xKey || !yKeys.length) {
     return (
       <div className="flex h-48 items-center justify-center rounded-md border border-dashed text-sm text-muted-foreground">
         Insufficient data to render chart
@@ -48,43 +79,79 @@ export function ChartRenderer({ config, results }: ChartRendererProps) {
 
   return (
     <div className="w-full">
-      {title && <p className="mb-2 text-sm font-medium text-center">{title}</p>}
+      {title && <p className="mb-2 text-center text-sm font-medium">{title}</p>}
       <ResponsiveContainer width="100%" height={280}>
-        {chart_type === "line" ? (
-          <LineChart data={data}>
+        {chartType === "line" ? (
+          <LineChart data={rawData}>
             <CartesianGrid strokeDasharray="3 3" />
-            <XAxis dataKey={x_axis} tick={{ fontSize: 11 }} />
+            <XAxis dataKey={xKey} tick={{ fontSize: 11 }} />
             <YAxis tick={{ fontSize: 11 }} />
             <Tooltip />
             <Legend />
-            <Line type="monotone" dataKey={y_axis} stroke={COLORS[0]} strokeWidth={2} dot={false} />
+            {yKeys.map((k, i) => (
+              <Line
+                key={k}
+                type="monotone"
+                dataKey={k}
+                stroke={COLORS[i % COLORS.length]}
+                strokeWidth={2}
+                dot={false}
+              />
+            ))}
           </LineChart>
-        ) : chart_type === "pie" ? (
-          <PieChart>
-            <Pie data={data} dataKey={y_axis} nameKey={x_axis} cx="50%" cy="50%" outerRadius={110} label>
-              {data.map((_, i) => (
-                <Cell key={i} fill={COLORS[i % COLORS.length]} />
-              ))}
-            </Pie>
+        ) : chartType === "area" ? (
+          <AreaChart data={rawData}>
+            <CartesianGrid strokeDasharray="3 3" />
+            <XAxis dataKey={xKey} tick={{ fontSize: 11 }} />
+            <YAxis tick={{ fontSize: 11 }} />
             <Tooltip />
             <Legend />
-          </PieChart>
-        ) : chart_type === "scatter" ? (
+            {yKeys.map((k, i) => (
+              <Area
+                key={k}
+                type="monotone"
+                dataKey={k}
+                stroke={COLORS[i % COLORS.length]}
+                fill={COLORS[i % COLORS.length] + "33"}
+                strokeWidth={2}
+              />
+            ))}
+          </AreaChart>
+        ) : chartType === "scatter" ? (
           <ScatterChart>
             <CartesianGrid />
-            <XAxis dataKey={x_axis} name={x_axis} tick={{ fontSize: 11 }} />
-            <YAxis dataKey={y_axis} name={y_axis} tick={{ fontSize: 11 }} />
+            <XAxis dataKey={xKey} name={xKey} tick={{ fontSize: 11 }} />
+            <YAxis dataKey={yKeys[0]} name={yKeys[0]} tick={{ fontSize: 11 }} />
             <Tooltip cursor={{ strokeDasharray: "3 3" }} />
-            <Scatter data={data} fill={COLORS[0]} />
+            <Scatter data={rawData} fill={COLORS[0]} />
           </ScatterChart>
-        ) : (
-          <BarChart data={data}>
+        ) : chartType === "bar_horizontal" ? (
+          <BarChart data={rawData} layout="vertical">
             <CartesianGrid strokeDasharray="3 3" />
-            <XAxis dataKey={x_axis} tick={{ fontSize: 11 }} />
+            <XAxis type="number" tick={{ fontSize: 11 }} />
+            <YAxis dataKey={xKey} type="category" tick={{ fontSize: 11 }} width={100} />
+            <Tooltip />
+            <Legend />
+            {yKeys.map((k, i) => (
+              <Bar key={k} dataKey={k} fill={COLORS[i % COLORS.length]} radius={[0, 4, 4, 0]} />
+            ))}
+          </BarChart>
+        ) : (
+          // bar, bar_grouped, and fallback
+          <BarChart data={rawData}>
+            <CartesianGrid strokeDasharray="3 3" />
+            <XAxis dataKey={xKey} tick={{ fontSize: 11 }} />
             <YAxis tick={{ fontSize: 11 }} />
             <Tooltip />
             <Legend />
-            <Bar dataKey={y_axis} fill={COLORS[0]} radius={[4, 4, 0, 0]} />
+            {yKeys.map((k, i) => (
+              <Bar
+                key={k}
+                dataKey={k}
+                fill={COLORS[i % COLORS.length]}
+                radius={[4, 4, 0, 0]}
+              />
+            ))}
           </BarChart>
         )}
       </ResponsiveContainer>

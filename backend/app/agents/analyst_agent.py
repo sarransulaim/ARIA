@@ -1,116 +1,159 @@
 import json
 import re
 import uuid
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents.base import BaseAgent
 
-_SYSTEM_PROMPT = """You are a senior data analyst interpreting SQL query results for a business audience.
+_SYSTEM = """\
+You are a Principal Data Scientist presenting findings to a C-suite audience.
 
-Analyze the results and respond with ONLY a valid JSON object — no markdown, no backticks:
+You have access to: the original question, all SQL steps executed, their results, \
+and optional statistical analysis (correlations, trends, group comparisons).
+
+Structure your response as ONLY a valid JSON object — no markdown, no backticks:
 {
-  "narrative": "Clear, business-focused explanation of what the data shows (2-4 sentences)",
-  "key_insight": "The single most important finding in one sentence",
-  "anomalies": ["any unusual pattern, outlier, or data quality issue"],
-  "suggested_followups": ["follow-up question 1", "follow-up question 2", "follow-up question 3"],
+  "narrative": "Bottom-line-up-front executive summary (3-5 sentences). Lead with the most important finding and exact number. Explain what drives the pattern. Reference statistical evidence if provided.",
+  "key_insights": [
+    "Specific finding with exact number or percentage",
+    "Trend or comparison with magnitude (e.g., '3.2x higher than average')",
+    "Surprising or actionable finding"
+  ],
+  "anomalies": ["Any outlier, data quality issue, or statistical anomaly worth flagging"],
+  "hypotheses": ["What might explain this pattern and why — be specific"],
+  "suggested_followups": [
+    "Specific analytical next-question 1",
+    "Specific analytical next-question 2",
+    "Specific analytical next-question 3"
+  ],
   "confidence": "high|medium|low",
-  "updated_summary": "Updated one-paragraph summary of this entire analysis session so far",
-  "chart_recommended": true,
-  "chart_type": "bar|line|pie|scatter|table|none",
-  "chart_config": {
-    "title": "Chart title",
-    "x_axis": "column name for x axis",
-    "y_axis": "column name for y axis",
-    "color_by": "optional grouping column"
-  }
-}"""
+  "updated_summary": "One-paragraph session summary incorporating this new finding",
+  "analysis_type": "trend_analysis|comparison|ranking|distribution|correlation|summary|segmentation|custom"
+}
+
+Guidelines:
+- Use exact numbers (not 'many' or 'high' — say '47% higher' or '3.2x the average')
+- Reference statistical evidence: correlation r=0.82, p<0.05, R²=0.91
+- Flag data quality issues if sample <30 rows or has >20% nulls
+- Next steps must be specific questions, not generic 'investigate further'
+- Never say 'the data shows' — say what the data shows
+"""
 
 
 class AnalystAgent(BaseAgent):
-    """
-    Interprets query results and produces business narrative, insights, and chart recommendations.
-    Uses claude-sonnet-4-6 for deep reasoning.
-    """
-
     def __init__(self, db: AsyncSession):
         super().__init__(db=db, model=None)
         self.model = self.model_smart
 
     async def run(self, input: dict, session_context: dict) -> dict:
         question: str = input["question"]
-        sql: str = input["sql"]
-        query_results: Dict[str, Any] = input.get("query_results", {})
-        row_count: int = input.get("row_count", 0)
-        business_context: str = input.get("business_context", "")
         session_summary: str = input.get("session_summary", "")
+        business_context: str = input.get("business_context", "")
+        intent: str = input.get("intent", "")
+        statistics: Dict[str, Any] = input.get("statistics", {})
 
         session_id_raw = session_context.get("session_id")
         session_id = uuid.UUID(session_id_raw) if session_id_raw else None
 
-        columns = query_results.get("columns", [])
-        rows = query_results.get("rows", [])
-        preview_rows = rows[:50]
-
-        results_text = self._format_results(columns, preview_rows, row_count)
+        # Support both old single-result and new multi-step inputs
+        step_results: Optional[List[Dict]] = input.get("step_results")
+        if step_results:
+            results_text = self._format_step_results(step_results)
+        else:
+            # Legacy single-result path
+            sql = input.get("sql", "")
+            qr = input.get("query_results", {})
+            row_count = input.get("row_count", 0)
+            results_text = self._format_single_result(sql, qr, row_count)
 
         parts = [
-            f"The analyst asked: {question}",
-            f"\nSQL Executed:\n{sql}",
-            f"\n{results_text}",
+            f"Question: {question}",
+            results_text,
         ]
+        if intent:
+            parts.append(f"\nAnalysis intent: {intent}")
+        if statistics:
+            parts.append(f"\nStatistical analysis:\n{json.dumps(statistics, indent=2)}")
         if business_context:
-            parts.append(f"\nBusiness Context:\n{business_context}")
+            parts.append(f"\nBusiness context:\n{business_context}")
         if session_summary:
-            parts.append(f"\nSession Summary So Far:\n{session_summary}")
+            parts.append(f"\nSession summary so far:\n{session_summary}")
 
         raw = await self._call_llm(
             messages=[{"role": "user", "content": "\n".join(parts)}],
-            system=_SYSTEM_PROMPT,
+            system=_SYSTEM,
             session_id=session_id,
         )
 
-        return self._parse_response(raw, session_summary)
+        return self._parse(raw, session_summary, intent)
 
     @staticmethod
-    def _format_results(columns: list, rows: list, total_rows: int) -> str:
+    def _format_step_results(step_results: List[Dict]) -> str:
+        parts = []
+        for sr in step_results:
+            step = sr.get("step", "?")
+            sql = sr.get("sql", "")
+            explanation = sr.get("explanation", "")
+            columns = sr.get("columns", [])
+            rows = sr.get("rows", [])
+            row_count = sr.get("row_count", 0)
+            header = " | ".join(str(c) for c in columns)
+            row_lines = [" | ".join(str(v) for v in r) for r in rows[:20]]
+            body = "\n".join(row_lines)
+            note = f"\n… ({row_count - len(row_lines)} more rows)" if row_count > len(row_lines) else ""
+            parts.append(
+                f"\n--- Step {step}: {explanation} ---\n"
+                f"SQL: {sql}\n"
+                f"Results ({row_count} rows):\n{header}\n{body}{note}"
+            )
+        return "\n".join(parts)
+
+    @staticmethod
+    def _format_single_result(sql: str, query_results: Dict, row_count: int) -> str:
+        columns = query_results.get("columns", [])
+        rows = query_results.get("rows", [])
         if not columns:
-            return f"Query returned {total_rows} rows with no columns."
+            return f"SQL: {sql}\nQuery returned {row_count} rows."
         header = " | ".join(str(c) for c in columns)
-        separator = "-" * len(header)
-        row_lines = [" | ".join(str(v) for v in row) for row in rows[:20]]
-        shown = len(row_lines)
+        row_lines = [" | ".join(str(v) for v in r) for r in rows[:20]]
         body = "\n".join(row_lines)
-        note = f"\n... ({total_rows - shown} more rows not shown)" if total_rows > shown else ""
-        return f"Results ({total_rows} total rows):\n{header}\n{separator}\n{body}{note}"
+        note = f"\n… ({row_count - len(row_lines)} more rows)" if row_count > len(row_lines) else ""
+        return f"SQL: {sql}\nResults ({row_count} rows):\n{header}\n{body}{note}"
 
     @staticmethod
-    def _parse_response(raw: str, fallback_summary: str) -> dict:
-        cleaned = raw.strip()
-        cleaned = re.sub(r"```(?:json)?\s*", "", cleaned).strip().rstrip("`")
+    def _parse(raw: str, fallback_summary: str, fallback_intent: str) -> dict:
+        cleaned = re.sub(r"```(?:json)?\s*", "", raw.strip()).strip().rstrip("`")
         try:
             parsed = json.loads(cleaned)
-            # Ensure required keys exist
-            parsed.setdefault("narrative", cleaned)
-            parsed.setdefault("key_insight", "")
-            parsed.setdefault("anomalies", [])
-            parsed.setdefault("suggested_followups", [])
-            parsed.setdefault("confidence", "medium")
-            parsed.setdefault("updated_summary", fallback_summary)
-            parsed.setdefault("chart_recommended", False)
-            parsed.setdefault("chart_type", "none")
-            parsed.setdefault("chart_config", {})
-            return parsed
         except json.JSONDecodeError:
             return {
                 "narrative": raw,
-                "key_insight": "",
+                "key_insights": [],
                 "anomalies": [],
+                "hypotheses": [],
                 "suggested_followups": [],
                 "confidence": "medium",
                 "updated_summary": fallback_summary,
+                "analysis_type": fallback_intent,
+                # Legacy keys kept for backward compat
+                "key_insight": "",
                 "chart_recommended": False,
                 "chart_type": "none",
                 "chart_config": {},
             }
+        parsed.setdefault("narrative", cleaned)
+        parsed.setdefault("key_insights", [])
+        parsed.setdefault("anomalies", [])
+        parsed.setdefault("hypotheses", [])
+        parsed.setdefault("suggested_followups", [])
+        parsed.setdefault("confidence", "medium")
+        parsed.setdefault("updated_summary", fallback_summary)
+        parsed.setdefault("analysis_type", fallback_intent)
+        # Legacy keys for backward compat
+        parsed.setdefault("key_insight", parsed["key_insights"][0] if parsed["key_insights"] else "")
+        parsed.setdefault("chart_recommended", False)
+        parsed.setdefault("chart_type", "none")
+        parsed.setdefault("chart_config", {})
+        return parsed

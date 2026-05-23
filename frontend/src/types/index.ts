@@ -85,12 +85,48 @@ export interface ResultsPreview {
 }
 
 export interface VisualizationConfig {
-  chart_type: string;
+  type: string;
   title?: string;
+  x_key?: string;
+  y_keys?: string[];
+  data?: unknown[];
+  // Legacy fields kept for backward compat
+  chart_type?: string;
   x_axis?: string;
   y_axis?: string;
   color_by?: string;
   [key: string]: unknown;
+}
+
+export type ArtifactType =
+  | "sql"
+  | "table"
+  | "chart"
+  | "statistics"
+  | "insights"
+  | "query_plan"
+  | "stat_card";
+
+export interface AnalysisArtifact {
+  artifact_type: ArtifactType;
+  title: string;
+  data: Record<string, unknown>;
+}
+
+export interface AnalysisStepResult {
+  step: number;
+  sql: string;
+  explanation: string;
+  columns: string[];
+  rows: unknown[][];
+  row_count: number;
+  execution_time_ms: number;
+}
+
+export interface AnalysisRequest {
+  question: string;
+  session_id: string;
+  connection_id: string;
 }
 
 export interface AnalysisResponse {
@@ -103,13 +139,90 @@ export interface AnalysisResponse {
   suggested_followups: string[];
   visualization_config: VisualizationConfig | null;
   error: boolean;
+  // Rich fields
+  analysis_type: string | null;
+  analysis_title: string | null;
+  artifacts: AnalysisArtifact[];
+  key_insights: string[];
+  statistical_summary: Record<string, unknown> | null;
+  data_quality_warnings: string[];
+  query_plan: string[];
+  all_charts: VisualizationConfig[];
+  all_step_results: AnalysisStepResult[];
 }
 
-export interface AnalysisRequest {
-  question: string;
-  session_id: string;
-  connection_id: string;
+// ── SSE Stream Events ─────────────────────────────────────────────────────────
+
+export interface StreamEventProgress {
+  type: "progress";
+  step: string;
+  message: string;
+  pct: number;
 }
+
+export interface StreamEventPlan {
+  type: "plan";
+  intent: string;
+  title: string;
+  steps: Array<{ step: number; purpose: string; sql_hint: string }>;
+}
+
+export interface StreamEventSql {
+  type: "sql";
+  step: number;
+  sql: string;
+  explanation: string;
+  tables_used: string[];
+}
+
+export interface StreamEventResult {
+  type: "result";
+  step: number;
+  columns: string[];
+  rows: unknown[][];
+  row_count: number;
+  execution_time_ms: number;
+}
+
+export interface StreamEventStats {
+  type: "stats";
+  data: Record<string, unknown>;
+}
+
+export interface StreamEventVisualizations {
+  type: "visualizations";
+  charts: VisualizationConfig[];
+}
+
+export interface StreamEventNarrative {
+  type: "narrative";
+  narrative: string;
+  key_insights: string[];
+  anomalies: string[];
+  hypotheses: string[];
+}
+
+export interface StreamEventDone {
+  type: "done";
+  response: AnalysisResponse;
+}
+
+export interface StreamEventError {
+  type: "error";
+  message: string;
+  response?: AnalysisResponse;
+}
+
+export type StreamEvent =
+  | StreamEventProgress
+  | StreamEventPlan
+  | StreamEventSql
+  | StreamEventResult
+  | StreamEventStats
+  | StreamEventVisualizations
+  | StreamEventNarrative
+  | StreamEventDone
+  | StreamEventError;
 
 // ── Query Executions ──────────────────────────────────────────────────────────
 
@@ -186,4 +299,22 @@ export interface CanvasEntry {
   vizConfig: VisualizationConfig | null;
   error: boolean;
   timestamp: string;
+  // Rich fields
+  analysisType: string | null;
+  analysisTitle: string | null;
+  artifacts: AnalysisArtifact[];
+  keyInsights: string[];
+  statisticalSummary: Record<string, unknown> | null;
+  dataQualityWarnings: string[];
+  queryPlan: string[];
+  allCharts: VisualizationConfig[];
+  allStepResults: AnalysisStepResult[];
+}
+
+export interface StreamingState {
+  isStreaming: boolean;
+  progressPct: number;
+  progressMessage: string;
+  currentPlan: StreamEventPlan | null;
+  streamingSteps: Map<number, { sql?: string; result?: StreamEventResult }>;
 }

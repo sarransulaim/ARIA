@@ -1,7 +1,9 @@
+import json
 import uuid
 from typing import List
 
 from fastapi import APIRouter, Depends
+from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
@@ -24,12 +26,45 @@ async def run_analysis(
     cache: CacheClient = Depends(get_cache_client),
 ) -> AnalysisResponse:
     """
-    Main ARIA endpoint. Takes a natural-language question, runs the full
-    Orchestrator pipeline (schema → SQL → execute → analysis), and returns
-    a structured AnalysisResponse. Never raises raw exceptions.
+    Full Orchestrator pipeline (schema → intent → SQL → execute → stats → analysis).
+    Returns a structured AnalysisResponse. For streaming, use POST /stream.
     """
     svc = QueryService(db=db, cache=cache)
     return await svc.run_analysis(request)
+
+
+@router.post("/stream")
+async def stream_analysis(
+    request: AnalysisRequest,
+    db: AsyncSession = Depends(get_db),
+    cache: CacheClient = Depends(get_cache_client),
+) -> StreamingResponse:
+    """
+    Server-Sent Events stream of the analysis pipeline.
+    Each event is a JSON object on a 'data:' line, terminated by a blank line.
+    Event types: progress | plan | sql | result | stats | visualizations | narrative | done | error
+    Stream ends with 'data: [DONE]'.
+    """
+    svc = QueryService(db=db, cache=cache)
+
+    async def event_stream():
+        try:
+            async for event in svc.stream_analysis(request):
+                yield f"data: {json.dumps(event)}\n\n"
+        except Exception as exc:
+            yield f"data: {json.dumps({'type': 'error', 'message': str(exc)})}\n\n"
+        finally:
+            yield "data: [DONE]\n\n"
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
 
 
 @router.get("/{session_id}/history", response_model=List[QueryExecutionResponse])

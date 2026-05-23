@@ -11,32 +11,38 @@ from app.core.config import settings
 from app.core.exceptions import LLMError
 from app.utils.sql_validator import validate_sql
 
-_SYSTEM_PROMPT = """You are a SQL expert for {dialect}.
+_SYSTEM = """\
+You are an expert data engineer producing production-quality analytical SQL for {dialect}.
 
-Given a natural language question and the relevant database schema, generate ONE valid SQL SELECT query.
+Write SQL that a senior analyst would be proud of:
+- Use CTEs (WITH clause) for any multi-step logic — they're easier to read and debug
+- Use window functions for rankings, running totals, period-over-period:
+    ROW_NUMBER(), RANK(), DENSE_RANK(), LAG(), LEAD(), SUM() OVER(), AVG() OVER()
+- Use conditional aggregation: SUM(CASE WHEN status = 'x' THEN amount END)
+- Use PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY col) for medians
+- Add meaningful column aliases — never col1, col2
+- ORDER results meaningfully (value DESC for rankings, date ASC for trends)
+- Apply LIMIT 10000 unless the question asks for top-N (then use that N)
+- Only SELECT queries — no INSERT, UPDATE, DELETE, DROP, TRUNCATE, or DDL
 
-Rules:
-- Only SELECT queries are allowed (no INSERT, UPDATE, DELETE, DROP, etc.)
-- Use the exact table and column names from the schema provided
-- Add a LIMIT if the query might return many rows (use LIMIT 10000 as default)
-- Write clean, readable SQL with proper formatting
-
-Respond with ONLY a valid JSON object — no markdown, no backticks, no explanation outside the JSON:
-{{
+Respond with ONLY a valid JSON object — no markdown, no backticks:
+{
   "sql": "SELECT ...",
-  "explanation": "Plain-English explanation of what this query does and why",
-  "tables_used": ["schema.table1", "schema.table2"],
-  "estimated_rows": "~100 rows",
+  "explanation": "Plain English: what this query computes and why this approach was chosen",
+  "tables_used": ["schema.table1"],
   "confidence": "high|medium|low"
-}}"""
+}
+"""
+
+_STEP_PREFIX = """\
+This is step {step} of {total} in a multi-step analysis.
+Step purpose: {purpose}
+SQL approach hint: {hint}
+
+"""
 
 
 class SQLAgent(BaseAgent):
-    """
-    Translates natural language questions into validated SQL queries.
-    Uses claude-sonnet-4-6 for careful reasoning. Retries on validation failure.
-    """
-
     def __init__(self, db: AsyncSession):
         super().__init__(db=db, model=None)
         self.model = self.model_smart
@@ -49,90 +55,86 @@ class SQLAgent(BaseAgent):
         session_history: str = input.get("session_history_summary", "")
         last_error: Optional[str] = input.get("last_error")
 
+        # Multi-step fields
+        step_purpose: str = input.get("step_purpose", "")
+        step_hint: str = input.get("step_hint", "")
+        is_multi_step: bool = bool(input.get("is_multi_step", False))
+        total_steps: int = int(input.get("total_steps", 1))
+        current_step: int = int(input.get("current_step", 1))
+
         session_id_raw = session_context.get("session_id")
         session_id = uuid.UUID(session_id_raw) if session_id_raw else None
 
-        system = _SYSTEM_PROMPT.format(dialect=dialect)
+        system = _SYSTEM.format(dialect=dialect)
 
-        parts = [
-            f"Question: {question}",
-            f"\nDatabase Schema:\n{schema_context}",
-        ]
+        parts = []
+        if is_multi_step and step_purpose:
+            parts.append(_STEP_PREFIX.format(
+                step=current_step, total=total_steps,
+                purpose=step_purpose, hint=step_hint or "Use best judgment",
+            ))
+        parts.append(f"Question: {question}")
+        parts.append(f"\nDatabase Schema:\n{schema_context}")
         if business_context:
             parts.append(f"\nBusiness Context:\n{business_context}")
         if session_history:
             parts.append(f"\nPrevious Analysis Summary:\n{session_history}")
         if last_error:
             parts.append(
-                f"\n⚠️ A previous SQL attempt failed when executed:\n{last_error}\n"
-                "Generate a corrected query that avoids this error."
+                f"\n⚠️ Previous SQL attempt failed at execution:\n{last_error}\n"
+                "Produce a corrected query that avoids this error."
             )
 
         messages = [{"role": "user", "content": "\n".join(parts)}]
-
         last_parse_error: Optional[str] = None
 
         for attempt in range(settings.sql_agent_max_retries):
-            raw = await self._call_llm(
-                messages=messages,
-                system=system,
-                session_id=session_id,
-            )
+            raw = await self._call_llm(messages=messages, system=system, session_id=session_id)
+            cleaned = re.sub(r"```(?:json)?\s*", "", raw.strip()).strip().rstrip("`")
 
-            # Strip markdown fences if the model wraps output
-            cleaned = raw.strip()
-            cleaned = re.sub(r"```(?:json)?\s*", "", cleaned).strip().rstrip("`")
-
-            # Parse JSON
             try:
                 parsed = json.loads(cleaned)
             except json.JSONDecodeError as exc:
                 last_parse_error = str(exc)
-                messages.append({"role": "assistant", "content": raw})
-                messages.append({
-                    "role": "user",
-                    "content": (
-                        f"Your response was not valid JSON (error: {exc}). "
-                        "Respond with ONLY a JSON object matching the required format."
-                    ),
-                })
+                messages += [
+                    {"role": "assistant", "content": raw},
+                    {"role": "user", "content": (
+                        f"Invalid JSON (error: {exc}). "
+                        "Respond with ONLY the JSON object."
+                    )},
+                ]
                 continue
 
             sql: str = (parsed.get("sql") or "").strip()
             if not sql:
-                messages.append({"role": "assistant", "content": raw})
-                messages.append({
-                    "role": "user",
-                    "content": "The 'sql' field was empty. Provide a complete SQL SELECT query.",
-                })
+                messages += [
+                    {"role": "assistant", "content": raw},
+                    {"role": "user", "content": "The 'sql' field was empty. Provide a complete SELECT query."},
+                ]
                 continue
 
-            # Validate — must be read-only
             is_valid, validation_error = validate_sql(sql, read_only=True, dialect=dialect)
             if not is_valid:
-                messages.append({"role": "assistant", "content": raw})
-                messages.append({
-                    "role": "user",
-                    "content": (
-                        f"The SQL failed validation: {validation_error}. "
-                        "Fix the query and respond with corrected JSON."
-                    ),
-                })
+                messages += [
+                    {"role": "assistant", "content": raw},
+                    {"role": "user", "content": (
+                        f"SQL failed validation: {validation_error}. "
+                        "Fix the query and return corrected JSON."
+                    )},
+                ]
                 continue
 
-            # Optionally transpile to target dialect for correctness
             try:
                 transpiled = sqlglot.transpile(sql, read="postgres", write=dialect)
                 if transpiled:
                     sql = transpiled[0]
             except Exception:
-                pass  # Use original SQL if transpilation fails
+                pass
 
             return {
                 "sql": sql,
                 "explanation": parsed.get("explanation", ""),
                 "tables_used": parsed.get("tables_used", []),
-                "estimated_rows": parsed.get("estimated_rows", "unknown"),
                 "confidence": parsed.get("confidence", "medium"),
             }
 

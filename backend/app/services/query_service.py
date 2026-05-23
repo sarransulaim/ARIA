@@ -1,5 +1,5 @@
 import uuid
-from typing import List, Optional
+from typing import AsyncGenerator, Dict, Any, List, Optional
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -28,6 +28,17 @@ class QueryService:
             session_context={},
         )
         return AnalysisResponse(**result)
+
+    async def stream_analysis(
+        self, request: AnalysisRequest
+    ) -> AsyncGenerator[Dict[str, Any], None]:
+        orchestrator = OrchestratorAgent(db=self.db, cache=self.cache)
+        async for event in orchestrator.stream(
+            question=request.question,
+            session_id=request.session_id,
+            connection_id=request.connection_id,
+        ):
+            yield event
 
     async def get_execution(self, query_execution_id: uuid.UUID) -> Optional[QueryExecution]:
         result = await self.db.execute(
